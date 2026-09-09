@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "d4e9d44c42b4564b6704546b4b565849",
+    "content-hash": "654857e55287501592d039ec10b9cda9",
     "packages": [],
     "packages-dev": [
         {
@@ -767,16 +767,16 @@
         },
         {
             "name": "phpcsstandards/phpcsutils",
-            "version": "1.2.2",
+            "version": "1.2.3",
             "source": {
                 "type": "git",
                 "url": "https://github.com/PHPCSStandards/PHPCSUtils.git",
-                "reference": "c216317e96c8b3f5932808f9b0f1f7a14e3bbf55"
+                "reference": "5f35d9408c54d7b529501f3c688b6eae562aea1f"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/PHPCSStandards/PHPCSUtils/zipball/c216317e96c8b3f5932808f9b0f1f7a14e3bbf55",
-                "reference": "c216317e96c8b3f5932808f9b0f1f7a14e3bbf55",
+                "url": "https://api.github.com/repos/PHPCSStandards/PHPCSUtils/zipball/5f35d9408c54d7b529501f3c688b6eae562aea1f",
+                "reference": "5f35d9408c54d7b529501f3c688b6eae562aea1f",
                 "shasum": ""
             },
             "require": {
@@ -856,7 +856,7 @@
                     "type": "thanks_dev"
                 }
             ],
-            "time": "2025-12-08T14:27:58+00:00"
+            "time": "2026-07-27T10:28:41+00:00"
         },
         {
             "name": "phpstan/phpdoc-parser",
@@ -2711,19 +2711,20 @@
         },
         {
             "name": "squizlabs/php_codesniffer",
-            "version": "4.0.1",
+            "version": "4.0.4",
             "source": {
                 "type": "git",
                 "url": "https://github.com/PHPCSStandards/PHP_CodeSniffer.git",
-                "reference": "0525c73950de35ded110cffafb9892946d7771b5"
+                "reference": "bbdc3d0532623e21838b7041a4364383a8126f96"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/PHPCSStandards/PHP_CodeSniffer/zipball/0525c73950de35ded110cffafb9892946d7771b5",
-                "reference": "0525c73950de35ded110cffafb9892946d7771b5",
+                "url": "https://api.github.com/repos/PHPCSStandards/PHP_CodeSniffer/zipball/bbdc3d0532623e21838b7041a4364383a8126f96",
+                "reference": "bbdc3d0532623e21838b7041a4364383a8126f96",
                 "shasum": ""
             },
             "require": {
+                "ext-libxml": "*",
                 "ext-simplexml": "*",
                 "ext-tokenizer": "*",
                 "ext-xmlwriter": "*",
@@ -2731,6 +2732,10 @@
             },
             "require-dev": {
                 "phpunit/phpunit": "^8.4.0 || ^9.3.4 || ^10.5.32 || 11.3.3 - 11.5.28 || ^11.5.31"
+            },
+            "suggest": {
+                "ext-iconv": "For accurate character length calculation when the checked files contain multi-byte characters.",
+                "ext-pcntl": "For parallel processing support via the --parallel CLI option."
             },
             "bin": [
                 "bin/phpcbf",
@@ -2786,7 +2791,7 @@
                     "type": "thanks_dev"
                 }
             ],
-            "time": "2025-11-10T16:43:36+00:00"
+            "time": "2026-08-06T02:45:27+00:00"
         },
         {
             "name": "theseer/tokenizer",
@@ -2840,16 +2845,16 @@
         },
         {
             "name": "wordpress/php-ai-client",
-            "version": "1.4.0",
+            "version": "dev-feature/gh281-deferred-tool-loading",
             "source": {
                 "type": "git",
                 "url": "https://github.com/WordPress/php-ai-client",
-                "reference": "a31b0ec6d4676d4a464055fef72173e2d8995214"
+                "reference": "2f88b1a54c486dbed8bbd9c887dc61f25b61f481"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/WordPress/php-ai-client/zipball/a31b0ec6d4676d4a464055fef72173e2d8995214",
-                "reference": "a31b0ec6d4676d4a464055fef72173e2d8995214",
+                "url": "https://api.github.com/repos/WordPress/php-ai-client/zipball/2f88b1a54c486dbed8bbd9c887dc61f25b61f481",
+                "reference": "2f88b1a54c486dbed8bbd9c887dc61f25b61f481",
                 "shasum": ""
             },
             "require": {
@@ -2875,14 +2880,14 @@
                 "slevomat/coding-standard": "^8.20",
                 "squizlabs/php_codesniffer": "^3.7 || ^4.0",
                 "symfony/dotenv": "^5.4",
-                "wordpress/anthropic-ai-provider": "^1.0",
-                "wordpress/google-ai-provider": "^1.0",
-                "wordpress/openai-ai-provider": "^1.0"
+                "wordpress/ai-provider-for-anthropic": "^1.0",
+                "wordpress/ai-provider-for-google": "^1.0",
+                "wordpress/ai-provider-for-openai": "^1.0"
             },
             "suggest": {
-                "wordpress/anthropic-ai-provider": "For Anthropic Claude model support",
-                "wordpress/google-ai-provider": "For Google Gemini model support",
-                "wordpress/openai-ai-provider": "For OpenAI GPT model support"
+                "wordpress/ai-provider-for-anthropic": "For Anthropic Claude model support",
+                "wordpress/ai-provider-for-google": "For Google Gemini model support",
+                "wordpress/ai-provider-for-openai": "For OpenAI GPT model support"
             },
             "type": "library",
             "autoload": {
@@ -2914,13 +2919,14 @@
                 "issues": "https://github.com/WordPress/php-ai-client/issues",
                 "source": "https://github.com/WordPress/php-ai-client"
             },
-            "time": "2026-07-15T01:43:23+00:00"
+            "time": "2026-09-09T18:36:40+00:00"
         }
     ],
     "aliases": [],
     "minimum-stability": "dev",
     "stability-flags": {
-        "phpcompatibility/php-compatibility": 20
+        "phpcompatibility/php-compatibility": 20,
+        "wordpress/php-ai-client": 20
     },
     "prefer-stable": true,
     "prefer-lowest": false,
