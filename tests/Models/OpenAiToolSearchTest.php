@@ -9,7 +9,6 @@ use ReflectionMethod;
 use WordPress\AiClient\Common\Exception\InvalidArgumentException;
 use WordPress\AiClient\Messages\DTO\Message;
 use WordPress\AiClient\Messages\DTO\MessagePart;
-use WordPress\AiClient\Messages\DTO\ProviderData;
 use WordPress\AiClient\Messages\Enums\MessageRoleEnum;
 use WordPress\AiClient\Providers\DTO\ProviderMetadata;
 use WordPress\AiClient\Providers\Enums\ProviderTypeEnum;
@@ -24,29 +23,27 @@ use WordPress\AiClient\Tools\DTO\WebSearch;
 use WordPress\OpenAiAiProvider\Models\OpenAiTextGenerationModel;
 
 /**
- * Tests provider-owned hosted tool search without a tool-search builder API.
+ * Tests provider-owned policy, function annotations, and server-managed continuation.
  *
  * @since n.e.x.t
  */
 class OpenAiToolSearchTest extends TestCase
 {
     /**
-     * Tests threshold boundaries, explicit tool choice, and conservative model support.
+     * Tests automatic defaults and request-level overrides without changing the config.
      *
      * @dataProvider policyProvider
      * @param string $modelId The model ID.
      * @param int $count The number of functions.
      * @param array<string, mixed> $options Provider options.
-     * @param bool $expected Whether search is expected with provider-data support.
+     * @param bool $expected Whether all functions should be deferred.
      */
-    public function testAutomaticPolicy(string $modelId, int $count, array $options, bool $expected): void
+    public function testPolicy(string $modelId, int $count, array $options, bool $expected): void
     {
         $model = $this->model($modelId, $count, $options);
         $original = $model->getConfig()->toArray();
         $params = $this->invoke($model, 'prepareGenerateTextParams', [$this->prompt()]);
-        $expected = $expected && class_exists(ProviderData::class);
-        $types = array_column($params['tools'], 'type');
-        $this->assertSame($expected, in_array('tool_search', $types, true));
+        $this->assertSame($expected, in_array('tool_search', array_column($params['tools'], 'type'), true));
         $this->assertCount($count + ($expected ? 1 : 0), $params['tools']);
         foreach ($params['tools'] as $tool) {
             if ($tool['type'] === 'function') {
@@ -54,11 +51,12 @@ class OpenAiToolSearchTest extends TestCase
             }
         }
         $this->assertArrayNotHasKey('openai_tool_search_threshold', $params);
+        $this->assertArrayNotHasKey('deferredLoading', $params);
         $this->assertSame($original, $model->getConfig()->toArray());
     }
 
     /**
-     * Provides policy cases.
+     * Provides automatic policy cases.
      *
      * @return array<string, array{string, int, array<string, mixed>, bool}> Test cases.
      */
@@ -73,7 +71,10 @@ class OpenAiToolSearchTest extends TestCase
             'old' => ['gpt-5.2', 11, [], false],
             'unknown' => ['custom-model', 11, [], false],
             'specialized' => ['gpt-5.4-codex', 11, [], false],
-            'opt out' => ['gpt-5.4', 11, ['openai_tool_search_threshold' => false], false],
+            'request opt out' => ['gpt-5.4', 11, ['deferredLoading' => false], false],
+            'request opt in' => ['gpt-5.4', 1, ['deferredLoading' => true], true],
+            'empty request opt in' => ['gpt-5.4', 0, ['deferredLoading' => true], false],
+            'threshold opt out' => ['gpt-5.4', 11, ['openai_tool_search_threshold' => false], false],
             'raised threshold' => ['gpt-5.4', 11, ['openai_tool_search_threshold' => 20], false],
             'lowered threshold' => ['gpt-5.4', 1, ['openai_tool_search_threshold' => 0], true],
             'zero with zero threshold' => ['gpt-5.4', 0, ['openai_tool_search_threshold' => 0], false],
@@ -81,205 +82,201 @@ class OpenAiToolSearchTest extends TestCase
             'none choice' => ['gpt-5.4', 11, ['tool_choice' => 'none'], false],
             'required choice' => ['gpt-5.4', 11, ['tool_choice' => 'required'], false],
             'forced choice' => ['gpt-5.4', 11, ['tool_choice' => ['type' => 'function', 'name' => 'tool_0']], false],
+            'stateless storage' => ['gpt-5.4', 11, ['store' => false], false],
+            'storage opt out beats opt in' => ['gpt-5.4', 1, ['store' => false, 'deferredLoading' => true], false],
         ];
     }
 
     /**
-     * Tests invalid provider thresholds fail locally.
+     * Tests per-function annotations take precedence over defaults, but not hard opt-outs.
      *
-     * @dataProvider invalidThresholdProvider
-     * @param mixed $threshold The invalid threshold.
+     * @dataProvider annotationsProvider
+     * @param array<string, mixed> $options Request options.
+     * @param list<array<string, mixed>> $metadata Function metadata.
+     * @param list<bool> $expected Expected per-function deferral.
      */
-    public function testInvalidThreshold($threshold): void
+    public function testAnnotations(array $options, array $metadata, array $expected): void
+    {
+        $model = $this->model('gpt-5.4', count($metadata), $options, $metadata);
+        $before = $model->getConfig()->toArray();
+        $params = $this->invoke($model, 'prepareGenerateTextParams', [$this->prompt()]);
+        foreach ($expected as $index => $deferred) {
+            $this->assertSame($deferred, $params['tools'][$index]['defer_loading'] ?? false);
+            $this->assertArrayNotHasKey('metadata', $params['tools'][$index]);
+            $this->assertArrayNotHasKey('deferredLoading', $params['tools'][$index]);
+            $this->assertArrayNotHasKey('vendor', $params['tools'][$index]);
+        }
+        $this->assertSame(
+            in_array(true, $expected, true),
+            in_array('tool_search', array_column($params['tools'], 'type'), true)
+        );
+        $this->assertSame($before, $model->getConfig()->toArray());
+    }
+
+    /**
+     * Provides annotation precedence cases.
+     *
+     * @return list<array{array<string, mixed>, list<array<string, mixed>>, list<bool>}> Test cases.
+     */
+    public static function annotationsProvider(): array
+    {
+        return [
+            [[], [['deferredLoading' => true], []], [true, false]],
+            [['deferredLoading' => true], [['deferredLoading' => false], []], [false, true]],
+            [['deferredLoading' => false], [['deferredLoading' => true], []], [false, false]],
+            [['openai_tool_search_threshold' => 0], [['deferredLoading' => false], []], [false, true]],
+            [['deferredLoading' => true], [['deferredLoading' => false]], [false]],
+            [['openai_tool_search_threshold' => false], [['deferredLoading' => true]], [false]],
+            [[], [['vendor' => ['arbitrary' => true]]], [false]],
+            [['store' => false], [['deferredLoading' => true]], [false]],
+        ];
+    }
+
+    /**
+     * Tests invalid policy values fail locally rather than leaking into the wire request.
+     *
+     * @dataProvider invalidPolicyProvider
+     * @param array<string, mixed> $options Request options.
+     * @param array<string, mixed> $metadata Function metadata.
+     */
+    public function testInvalidPolicy(array $options, array $metadata): void
     {
         $this->expectException(InvalidArgumentException::class);
-        $model = $this->model('gpt-5.4', 11, ['openai_tool_search_threshold' => $threshold]);
+        $model = $this->model('gpt-5.4', 1, $options, [$metadata]);
         $this->invoke($model, 'prepareGenerateTextParams', [$this->prompt()]);
     }
 
     /**
-     * Provides invalid thresholds.
+     * Provides invalid request and annotation values.
      *
-     * @return list<array{mixed}> Test cases.
+     * @return list<array{array<string, mixed>, array<string, mixed>}> Test cases.
      */
-    public static function invalidThresholdProvider(): array
+    public static function invalidPolicyProvider(): array
     {
-        return [[-1], [true], ['10'], [1.5], [[]]];
+        return [
+            [['openai_tool_search_threshold' => -1], []],
+            [['openai_tool_search_threshold' => true], []],
+            [['openai_tool_search_threshold' => '10'], []],
+            [['openai_tool_search_threshold' => null], []],
+            [['deferredLoading' => 'true'], []],
+            [['deferredLoading' => null], []],
+            [[], ['deferredLoading' => 1]],
+            [[], ['deferredLoading' => null]],
+        ];
     }
 
     /**
-     * Tests built-ins do not count toward the threshold or get deferred.
+     * Tests web search stays eager and does not count toward the function threshold.
      */
     public function testWebSearchIsIndependent(): void
     {
-        foreach ([10, 11] as $count) {
-            $model = $this->model('gpt-5.4', $count);
-            $model->getConfig()->setWebSearch(new WebSearch());
-            $params = $this->invoke($model, 'prepareGenerateTextParams', [$this->prompt()]);
-            $this->assertSame(['type' => 'web_search'], $params['tools'][count($params['tools']) - 1]);
-            $this->assertSame(
-                $count > 10 && class_exists(ProviderData::class),
-                in_array('tool_search', array_column($params['tools'], 'type'), true)
-            );
-        }
+        $model = $this->model('gpt-5.4', 10);
+        $model->getConfig()->setWebSearch(new WebSearch());
+        $params = $this->invoke($model, 'prepareGenerateTextParams', [$this->prompt()]);
+        $this->assertCount(11, $params['tools']);
+        $this->assertSame(['type' => 'web_search'], $params['tools'][10]);
     }
 
     /**
-     * Tests serialization and replay of hosted search, reasoning, and a namespaced mapped function.
+     * Tests discovery stays on the server while a fresh model sends only a new function result.
      */
-    public function testStatelessRoundTrip(): void
+    public function testServerManagedContinuation(): void
     {
-        $this->requireProviderData();
-        $model = $this->model('gpt-5.4', 11, ['store' => false]);
+        $model = $this->model('gpt-5.4', 1, ['deferredLoading' => true]);
         $params = $this->invoke($model, 'prepareGenerateTextParams', [$this->prompt()]);
         $safeName = $params['tools'][0]['name'];
-        $search = $this->searchItems();
-        $reasoning = ['type' => 'reasoning', 'id' => 'rs_1', 'summary' => [], 'encrypted_content' => 'opaque'];
-        $call = [
-            'type' => 'function_call', 'call_id' => 'call_1', 'name' => $safeName,
-            'namespace' => $safeName, 'arguments' => '{"query":"posts"}',
-        ];
-        $output = [$search[0], $reasoning, $search[1], $call];
+        $output = $this->searchItems();
+        $output[] = ['type' => 'function_call', 'call_id' => 'call_1', 'name' => $safeName,
+            'namespace' => $safeName, 'arguments' => '{"query":"posts"}'];
         $response = new Response(200, [], (string) json_encode(['id' => 'resp_1', 'output' => $output]));
         $result = $this->invoke($model, 'parseResponseToGenerativeAiResult', [$response]);
         $this->assertCount(1, $result->getCandidates());
         $this->assertTrue($result->getCandidates()[0]->getFinishReason()->isToolCalls());
-        $message = Message::fromArray($result->toMessage()->toArray());
-        $parts = $message->getParts();
-        $this->assertSame('plugin/tool_0', $parts[count($parts) - 1]->getFunctionCall()->getName());
+        $parts = $result->toMessage()->getParts();
+        $this->assertCount(1, $parts);
+        $this->assertSame('plugin/tool_0', $parts[0]->getFunctionCall()->getName());
+        $this->assertSame(['continuation' => 'previous_response_id'], $result->getAdditionalData()['tool_search']);
 
-        // A fresh model proves that replay does not depend on instance-local search state.
-        $next = $this->model('gpt-5.4', 11, ['store' => false]);
+        $next = $this->model('gpt-5.4', 1, ['deferredLoading' => true, 'previous_response_id' => $result->getId()]);
         $reply = new Message(MessageRoleEnum::user(), [new MessagePart(new FunctionResponse('call_1', null, ['ok']))]);
-        $nextParams = $this->invoke($next, 'prepareGenerateTextParams', [[$message, $reply]]);
-        // Object key order is immaterial; numeric output-item positions must remain unchanged.
-        $this->assertEquals($output, array_slice($nextParams['input'], 0, 4));
-        $this->assertSame('function_call_output', $nextParams['input'][4]['type']);
-        $this->assertFalse($nextParams['store']);
+        $nextParams = $this->invoke($next, 'prepareGenerateTextParams', [[$reply]]);
+        $this->assertSame('resp_1', $nextParams['previous_response_id']);
+        $this->assertCount(1, $nextParams['input']);
+        $this->assertSame('function_call_output', $nextParams['input'][0]['type']);
+        $this->assertSame('call_1', $nextParams['input'][0]['call_id']);
+        $this->assertSame(['type' => 'tool_search'], $nextParams['tools'][1]);
+        $this->assertArrayNotHasKey('store', $nextParams); // Never override the application's storage choice.
     }
 
     /**
-     * Tests search-only output is retained without requesting application execution.
+     * Tests stateless model history or orphan function results keep functions eager.
      */
-    public function testSearchOnlyOutput(): void
+    public function testStatelessInputKeepsFunctionsEager(): void
     {
-        $this->requireProviderData();
-        $model = $this->model();
-        $response = new Response(200, [], (string) json_encode(['output' => $this->searchItems()]));
-        $result = $this->invoke($model, 'parseResponseToGenerativeAiResult', [$response]);
-        $this->assertCount(1, $result->getCandidates());
+        $model = $this->model('gpt-5.4', 11);
+        $messages = [
+            new Message(MessageRoleEnum::model(), [new MessagePart('Previous answer')]),
+            new Message(MessageRoleEnum::user(), [new MessagePart(new FunctionResponse('call_1', null, ['ok']))]),
+        ];
+        foreach ($messages as $message) {
+            $params = $this->invoke($model, 'prepareGenerateTextParams', [[$message]]);
+            $this->assertCount(11, $params['tools']);
+            foreach ($params['tools'] as $tool) {
+                $this->assertArrayNotHasKey('defer_loading', $tool);
+            }
+        }
+    }
+
+    /**
+     * Tests search-only responses expose an ID and no executable search call.
+     */
+    public function testSearchOnlyResponse(): void
+    {
+        $response = new Response(200, [], (string) json_encode(['id' => 'resp_1', 'output' => $this->searchItems()]));
+        $result = $this->invoke($this->model(), 'parseResponseToGenerativeAiResult', [$response]);
+        $this->assertSame('resp_1', $result->getId());
+        $this->assertSame([], $result->toMessage()->getParts());
         $this->assertTrue($result->getCandidates()[0]->getFinishReason()->isStop());
-        $input = $this->invoke($model, 'prepareInputParam', [$result->toMessages()]);
-        $this->assertSame($this->searchItems(), $input);
     }
 
     /**
-     * Tests provider ownership and item-type validation reject foreign or arbitrary replay data.
-     */
-    public function testForeignProviderDataIsRejected(): void
-    {
-        $this->requireProviderData();
-        $message = new Message(MessageRoleEnum::model(), [
-            new MessagePart(new ProviderData('anthropic', $this->searchItems()[0])),
-        ]);
-        $this->expectException(InvalidArgumentException::class);
-        $this->invoke($this->model(), 'prepareInputParam', [[$message]]);
-    }
-
-    /**
-     * Tests client-executed discovery cannot silently masquerade as hosted search.
+     * Tests client-executed discovery and missing continuation IDs are rejected.
      */
     public function testClientSearchResponseIsRejected(): void
     {
-        $this->requireProviderData();
-        $item = $this->searchItems()[0];
-        $item['execution'] = 'client';
-        $item['call_id'] = 'client_1';
+        $items = $this->searchItems();
+        $items[0]['execution'] = 'client';
+        $items[0]['call_id'] = 'call_search';
+        $response = new Response(200, [], (string) json_encode(['id' => 'resp_1', 'output' => $items]));
         $this->expectException(ResponseException::class);
-        $response = new Response(200, [], (string) json_encode(['output' => [$item]]));
         $this->invoke($this->model(), 'parseResponseToGenerativeAiResult', [$response]);
     }
 
     /**
-     * Tests arbitrary, unfinished, and user-authored opaque items cannot be replayed.
-     *
-     * @dataProvider invalidReplayProvider
-     * @param array<string, mixed> $item The invalid item.
-     * @param bool $userRole Whether the message uses a user role.
+     * Tests search results without a response ID cannot silently lose continuation state.
      */
-    public function testInvalidReplay(array $item, bool $userRole = false): void
+    public function testMissingResponseIdIsRejected(): void
     {
-        $this->requireProviderData();
-        $message = new Message($userRole ? MessageRoleEnum::user() : MessageRoleEnum::model(), [
-            new MessagePart(new ProviderData('openai', $item)),
-        ]);
-        $this->expectException(InvalidArgumentException::class);
-        $this->invoke($this->model(), 'prepareInputParam', [[$message]]);
+        $response = new Response(200, [], (string) json_encode(['output' => $this->searchItems()]));
+        $this->expectException(ResponseException::class);
+        $this->invoke($this->model(), 'parseResponseToGenerativeAiResult', [$response]);
     }
 
     /**
-     * Provides invalid replay cases.
-     *
-     * @return list<array{array<string, mixed>, bool}> Test cases.
-     */
-    public static function invalidReplayProvider(): array
-    {
-        $valid = ['type' => 'tool_search_output', 'execution' => 'server', 'call_id' => null,
-            'status' => 'completed', 'tools' => []];
-        return [
-            [['type' => 'additional_tools', 'role' => 'developer', 'tools' => []], false],
-            [array_replace($valid, ['status' => 'in_progress']), false],
-            [array_replace($valid, ['tools' => 'invalid']), false],
-            [array_replace($valid, ['call_id' => 'client_call']), false],
-            [$valid, true],
-            [['type' => 'function_call_namespace', 'call_id' => 123], false],
-        ];
-    }
-
-    /**
-     * Tests text/search ordering and preservation across unrelated built-in output items.
-     */
-    public function testTextAndSearchOrdering(): void
-    {
-        $this->requireProviderData();
-        $search = $this->searchItems();
-        $output = [
-            ['type' => 'message', 'role' => 'assistant', 'content' => [['type' => 'output_text', 'text' => 'Before']]],
-            $search[0], $search[1], ['type' => 'web_search_call', 'id' => 'ws_1'],
-            ['type' => 'message', 'role' => 'assistant', 'content' => [['type' => 'output_text', 'text' => 'After']]],
-        ];
-        $model = $this->model();
-        $response = new Response(200, [], (string) json_encode(['output' => $output]));
-        $result = $this->invoke($model, 'parseResponseToGenerativeAiResult', [$response]);
-        $input = $this->invoke($model, 'prepareInputParam', [$result->toMessages()]);
-        $this->assertCount(4, $input);
-        $this->assertSame('Before', $input[0]['content'][0]['text']);
-        $this->assertSame($search, array_slice($input, 1, 2));
-        $this->assertSame('After', $input[3]['content'][0]['text']);
-    }
-
-    /**
-     * Tests server continuation forwards only the new input supplied by the application.
-     */
-    public function testPreviousResponseIdRemainsAnOrdinaryCustomOption(): void
-    {
-        $model = $this->model('gpt-5.4', 11, ['previous_response_id' => 'resp_previous']);
-        $params = $this->invoke($model, 'prepareGenerateTextParams', [$this->prompt()]);
-        $this->assertSame('resp_previous', $params['previous_response_id']);
-        $this->assertCount(1, $params['input']);
-        $this->assertSame('input_text', $params['input'][0]['content'][0]['type']);
-    }
-
-    /**
-     * Creates a model with ordinary SDK function declarations.
+     * Creates a model using ordinary declarations with optional generic metadata.
      *
      * @param string $id The model ID.
      * @param int $count The number of functions.
      * @param array<string, mixed> $options Provider options.
+     * @param list<array<string, mixed>> $metadata Per-function metadata.
      * @return OpenAiTextGenerationModel The model.
      */
-    private function model(string $id = 'gpt-5.4', int $count = 0, array $options = []): OpenAiTextGenerationModel
-    {
+    private function model(
+        string $id = 'gpt-5.4',
+        int $count = 0,
+        array $options = [],
+        array $metadata = []
+    ): OpenAiTextGenerationModel {
         $model = new OpenAiTextGenerationModel(
             new ModelMetadata($id, $id, [CapabilityEnum::textGeneration()], []),
             new ProviderMetadata('openai', 'OpenAI', ProviderTypeEnum::cloud())
@@ -290,7 +287,7 @@ class OpenAiToolSearchTest extends TestCase
             $functions[] = new FunctionDeclaration('plugin/tool_' . $i, 'Search content ' . $i, [
                 'type' => 'object', 'properties' => ['query' => ['type' => 'string']],
                 'required' => ['query'], 'additionalProperties' => false,
-            ]);
+            ], $metadata[$i] ?? []);
         }
         $config->setFunctionDeclarations($functions);
         $config->setCustomOptions($options);
@@ -324,17 +321,7 @@ class OpenAiToolSearchTest extends TestCase
     }
 
     /**
-     * Skips replay cases on SDK versions without provider data, leaving fallback coverage active.
-     */
-    private function requireProviderData(): void
-    {
-        if (!class_exists(ProviderData::class)) {
-            $this->markTestSkipped('Requires php-ai-client provider-data support (PR #282).');
-        }
-    }
-
-    /**
-     * Invokes an existing protected model method for isolated testing.
+     * Invokes an existing protected method for isolated testing.
      *
      * @param OpenAiTextGenerationModel $model The model.
      * @param string $name The method name.

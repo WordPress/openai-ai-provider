@@ -9,7 +9,6 @@ use WordPress\AiClient\Common\Exception\RuntimeException;
 use WordPress\AiClient\Common\Exception\TokenLimitReachedException;
 use WordPress\AiClient\Messages\DTO\Message;
 use WordPress\AiClient\Messages\DTO\MessagePart;
-use WordPress\AiClient\Messages\DTO\ProviderData;
 use WordPress\AiClient\Messages\Enums\MessagePartChannelEnum;
 use WordPress\AiClient\Messages\Enums\MessageRoleEnum;
 use WordPress\AiClient\Providers\ApiBasedImplementation\AbstractApiBasedModel;
@@ -81,11 +80,6 @@ class OpenAiTextGenerationModel extends AbstractApiBasedModel implements TextGen
      * @var array<string, string>
      */
     private array $clientFunctionNameMap = [];
-
-    /**
-     * @var array<string, string> Provider namespaces keyed by function call ID for replay.
-     */
-    private array $functionCallNamespaces = [];
 
     private const OPENAI_FUNCTION_NAME_MAX_LENGTH = 64;
     private const OPENAI_FUNCTION_NAME_HASH_LENGTH = 8;
@@ -186,13 +180,25 @@ class OpenAiTextGenerationModel extends AbstractApiBasedModel implements TextGen
         $customOptions = $config->getCustomOptions();
 
         // Provider policy, not an OpenAI wire parameter or a core model requirement.
-        unset($customOptions['openai_tool_search_threshold']);
+        unset($customOptions['openai_tool_search_threshold'], $customOptions['deferredLoading']);
 
         if (is_array($functionDeclarations) || $webSearch) {
             $params['tools'] = $this->prepareToolsParam(
                 $functionDeclarations,
                 $webSearch
             );
+            if (!$this->supportsToolSearchInput($params['input'])) {
+                // Stateless history cannot retain discovery items with the current SDK message types.
+                $tools = [];
+                foreach ($params['tools'] as $tool) {
+                    if ($tool['type'] === 'tool_search') {
+                        continue;
+                    }
+                    unset($tool['defer_loading']);
+                    $tools[] = $tool;
+                }
+                $params['tools'] = $tools;
+            }
         }
 
         /*
@@ -281,49 +287,15 @@ class OpenAiTextGenerationModel extends AbstractApiBasedModel implements TextGen
     protected function prepareInputParam(array $messages): array
     {
         $this->validateMessages($messages);
-        $this->functionCallNamespaces = [];
 
         $input = [];
         foreach ($messages as $message) {
-            $contentParts = [];
-            foreach ($message->getParts() as $part) {
-                $providerData = method_exists($part, 'getProviderData') ? $part->getProviderData() : null;
-                if ($providerData !== null || $part->getChannel()->isThought()) {
-                    // Flush content before each top-level item to preserve the original order.
-                    $contentItem = $this->getMessageInputItem(new Message($message->getRole(), $contentParts));
-                    if ($contentItem !== null) {
-                        $input[] = $contentItem;
-                    }
-                    $contentParts = [];
-                    if ($providerData !== null) {
-                        if ($providerData->getProviderId() !== $this->providerMetadata()->getId()) {
-                            throw new InvalidArgumentException('Cannot replay message data from another provider.');
-                        }
-                        if (!$message->getRole()->isModel()) {
-                            throw new InvalidArgumentException('Tool search data must belong to a model message.');
-                        }
-                        $item = $providerData->getData();
-                        if (($item['type'] ?? null) === 'function_call_namespace') {
-                            if (!is_string($item['call_id'] ?? null) || !is_string($item['namespace'] ?? null)) {
-                                throw new InvalidArgumentException('Invalid function call namespace data.');
-                            }
-                            $this->functionCallNamespaces[$item['call_id']] = $item['namespace'];
-                            continue;
-                        }
-                        $this->validateToolSearchItem($item);
-                        $input[] = $item;
-                    } else {
-                        foreach ($this->getReasoningInputItems(new Message($message->getRole(), [$part])) as $item) {
-                            $input[] = $item;
-                        }
-                    }
-                } else {
-                    $contentParts[] = $part;
-                }
+            foreach ($this->getReasoningInputItems($message) as $reasoningItem) {
+                $input[] = $reasoningItem;
             }
-            $contentItem = $this->getMessageInputItem(new Message($message->getRole(), $contentParts));
-            if ($contentItem !== null) {
-                $input[] = $contentItem;
+            $inputItem = $this->getMessageInputItem($message);
+            if ($inputItem !== null) {
+                $input[] = $inputItem;
             }
         }
         return $input;
@@ -397,10 +369,7 @@ class OpenAiTextGenerationModel extends AbstractApiBasedModel implements TextGen
         foreach ($messages as $message) {
             $contentParts = [];
             foreach ($message->getParts() as $part) {
-                if (
-                    $part->getChannel()->isThought()
-                    || (method_exists($part, 'getProviderData') && $part->getProviderData() !== null)
-                ) {
+                if ($part->getChannel()->isThought()) {
                     continue;
                 }
                 $contentParts[] = $part;
@@ -569,17 +538,12 @@ class OpenAiTextGenerationModel extends AbstractApiBasedModel implements TextGen
                     'The function_call typed message part must contain a function name.'
                 );
             }
-            $data = [
+            return [
                 'type' => 'function_call',
                 'call_id' => $functionCall->getId(),
                 'name' => $this->openAiFunctionName($functionName),
                 'arguments' => json_encode($functionCall->getArgs()),
             ];
-            $callId = $functionCall->getId();
-            if ($callId !== null && isset($this->functionCallNamespaces[$callId])) {
-                $data['namespace'] = $this->functionCallNamespaces[$callId];
-            }
-            return $data;
         }
         if ($type->isFunctionResponse()) {
             $functionResponse = $part->getFunctionResponse();
@@ -618,7 +582,9 @@ class OpenAiTextGenerationModel extends AbstractApiBasedModel implements TextGen
         $tools = [];
         $this->openAiFunctionNameMap = [];
         $this->clientFunctionNameMap = [];
-        $useToolSearch = $this->shouldUseToolSearch(count($functionDeclarations ?? []));
+        $deferByDefault = $this->shouldUseToolSearch(count($functionDeclarations ?? []));
+        $canDefer = $this->supportsToolSearch();
+        $useToolSearch = false;
 
         if (is_array($functionDeclarations)) {
             foreach ($functionDeclarations as $functionDeclaration) {
@@ -629,8 +595,15 @@ class OpenAiTextGenerationModel extends AbstractApiBasedModel implements TextGen
                     'description' => $functionDeclaration->getDescription(),
                     'parameters' => $functionDeclaration->getParameters(),
                 ];
-                if ($useToolSearch) {
+                // Older SDKs can still use request-level policy without per-function annotations.
+                $metadata = method_exists($functionDeclaration, 'getMetadata')
+                    ? $functionDeclaration->getMetadata() : [];
+                if (array_key_exists('deferredLoading', $metadata) && !is_bool($metadata['deferredLoading'])) {
+                    throw new InvalidArgumentException('Function metadata deferredLoading must be a boolean.');
+                }
+                if ($canDefer && ($metadata['deferredLoading'] ?? $deferByDefault)) {
                     $tool['defer_loading'] = true;
+                    $useToolSearch = true;
                 }
                 $tools[] = $tool;
             }
@@ -664,16 +637,34 @@ class OpenAiTextGenerationModel extends AbstractApiBasedModel implements TextGen
     protected function shouldUseToolSearch(int $functionCount): bool
     {
         $options = $this->getConfig()->getCustomOptions();
-        $threshold = $options['openai_tool_search_threshold'] ?? 10;
+        $threshold = array_key_exists('openai_tool_search_threshold', $options)
+            ? $options['openai_tool_search_threshold'] : 10;
         if ($threshold !== false && (!is_int($threshold) || $threshold < 0)) {
             throw new InvalidArgumentException('openai_tool_search_threshold must be a non-negative integer or false.');
         }
+        if (array_key_exists('deferredLoading', $options) && !is_bool($options['deferredLoading'])) {
+            throw new InvalidArgumentException('The deferredLoading custom option must be a boolean.');
+        }
 
-        // Explicit tool choice must keep its original meaning, including forced function calls.
+        return $this->supportsToolSearch()
+            && (($options['deferredLoading'] ?? false) || ($threshold !== false && $functionCount > $threshold));
+    }
+
+    /**
+     * Checks whether the model and request options allow the hosted-search experiment.
+     *
+     * @since n.e.x.t
+     *
+     * @return bool Whether deferred tools can be used.
+     */
+    protected function supportsToolSearch(): bool
+    {
+        $options = $this->getConfig()->getCustomOptions();
         if (
-            $threshold === false || $functionCount <= $threshold
+            ($options['deferredLoading'] ?? null) === false
+            || ($options['openai_tool_search_threshold'] ?? null) === false
+            || ($options['store'] ?? true) === false
             || (isset($options['tool_choice']) && $options['tool_choice'] !== 'auto')
-            || !class_exists(ProviderData::class)
         ) {
             return false;
         }
@@ -682,7 +673,32 @@ class OpenAiTextGenerationModel extends AbstractApiBasedModel implements TextGen
     }
 
     /**
-     * Validates an opaque hosted search item before preserving or replaying it.
+     * Checks that input is new user content or tool results for a stored response.
+     *
+     * @since n.e.x.t
+     *
+     * @param list<array<string, mixed>> $input The prepared input items.
+     * @return bool Whether discovery state can remain on the server instead of being replayed.
+     */
+    protected function supportsToolSearchInput(array $input): bool
+    {
+        $options = $this->getConfig()->getCustomOptions();
+        $previousId = $options['previous_response_id'] ?? null;
+        foreach ($input as $item) {
+            if (
+                ($item['role'] ?? null) === 'assistant'
+                || in_array($item['type'] ?? null, ['reasoning', 'function_call'], true)
+                || (($item['type'] ?? null) === 'function_call_output'
+                    && (!is_string($previousId) || $previousId === ''))
+            ) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Validates hosted search output without representing it as an application function call.
      *
      * @since n.e.x.t
      *
@@ -701,7 +717,7 @@ class OpenAiTextGenerationModel extends AbstractApiBasedModel implements TextGen
             || ($type === 'tool_search_call' && !is_array($item['arguments'] ?? null))
             || ($type === 'tool_search_output' && !is_array($item['tools'] ?? null))
         ) {
-            throw new InvalidArgumentException('Only completed hosted tool search items can be replayed.');
+            throw new InvalidArgumentException('Only completed hosted tool search items are supported.');
         }
     }
 
@@ -750,6 +766,7 @@ class OpenAiTextGenerationModel extends AbstractApiBasedModel implements TextGen
 
         $candidates = [];
         $pendingReasoningParts = [];
+        $toolSearchUsed = false;
         foreach ($responseData['output'] as $index => $outputItem) {
             if (!is_array($outputItem) || array_is_list($outputItem)) {
                 throw ResponseException::fromInvalidData(
@@ -768,9 +785,6 @@ class OpenAiTextGenerationModel extends AbstractApiBasedModel implements TextGen
             }
 
             if (in_array($outputItem['type'] ?? '', ['tool_search_call', 'tool_search_output'], true)) {
-                if (!class_exists(ProviderData::class)) {
-                    throw new RuntimeException('Tool search requires SDK support for provider message data.');
-                }
                 try {
                     $this->validateToolSearchItem($outputItem);
                 } catch (InvalidArgumentException $e) {
@@ -780,9 +794,8 @@ class OpenAiTextGenerationModel extends AbstractApiBasedModel implements TextGen
                         $e->getMessage()
                     );
                 }
-                $pendingReasoningParts[] = new MessagePart(
-                    new ProviderData($this->providerMetadata()->getId(), $outputItem)
-                );
+                // OpenAI retains these items for previous_response_id continuation.
+                $toolSearchUsed = true;
                 continue;
             }
 
@@ -794,27 +807,8 @@ class OpenAiTextGenerationModel extends AbstractApiBasedModel implements TextGen
             );
             if ($candidate !== null) {
                 $candidates[] = $candidate;
-            } elseif ($pendingReasoningParts !== [] && class_exists(ProviderData::class)) {
-                // Do not lose discovery state when an unrelated built-in item intervenes.
-                foreach ($pendingReasoningParts as $part) {
-                    if ($part->getProviderData() !== null) {
-                        $candidates[] = new Candidate(
-                            new Message(MessageRoleEnum::model(), $pendingReasoningParts),
-                            $this->parseStatusToFinishReason($status, false)
-                        );
-                        break;
-                    }
-                }
             }
             $pendingReasoningParts = [];
-        }
-
-        // A search-only response still carries conversation state, not an application tool call.
-        if ($pendingReasoningParts !== []) {
-            $candidates[] = new Candidate(
-                new Message(MessageRoleEnum::model(), $pendingReasoningParts),
-                $this->parseStatusToFinishReason($status, false)
-            );
         }
 
         $id = isset($responseData['id']) && is_string($responseData['id']) ? $responseData['id'] : '';
@@ -829,6 +823,19 @@ class OpenAiTextGenerationModel extends AbstractApiBasedModel implements TextGen
         // Use any other data from the response as provider-specific response metadata.
         $additionalData = $responseData;
         unset($additionalData['id'], $additionalData['output'], $additionalData['usage']);
+        if ($toolSearchUsed) {
+            if ($id === '') {
+                throw ResponseException::fromMissingData($this->providerMetadata()->getName(), 'id');
+            }
+            $additionalData['tool_search'] = ['continuation' => 'previous_response_id'];
+            if ($candidates === []) {
+                // The SDK requires a candidate, but hosted discovery is not an executable function call.
+                $candidates[] = new Candidate(
+                    new Message(MessageRoleEnum::model(), []),
+                    $this->parseStatusToFinishReason($status, false)
+                );
+            }
+        }
 
         return new GenerativeAiResult(
             $id,
@@ -1041,16 +1048,6 @@ class OpenAiTextGenerationModel extends AbstractApiBasedModel implements TextGen
 
         $part = new MessagePart($functionCall);
         $parts = $reasoningParts;
-        if (isset($outputItem['namespace']) && is_string($outputItem['namespace'])) {
-            if (!class_exists(ProviderData::class)) {
-                throw new RuntimeException('Namespaced function calls require SDK support for provider message data.');
-            }
-            $parts[] = new MessagePart(new ProviderData($this->providerMetadata()->getId(), [
-                'type' => 'function_call_namespace',
-                'call_id' => $outputItem['call_id'],
-                'namespace' => $outputItem['namespace'],
-            ]));
-        }
         $parts[] = $part;
         $message = new Message(MessageRoleEnum::model(), $parts);
 

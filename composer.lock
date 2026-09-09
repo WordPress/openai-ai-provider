@@ -2849,12 +2849,12 @@
             "source": {
                 "type": "git",
                 "url": "https://github.com/WordPress/php-ai-client",
-                "reference": "2f88b1a54c486dbed8bbd9c887dc61f25b61f481"
+                "reference": "dec7664cc17d8cf4287680c564fcdc428ebce7ec"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/WordPress/php-ai-client/zipball/2f88b1a54c486dbed8bbd9c887dc61f25b61f481",
-                "reference": "2f88b1a54c486dbed8bbd9c887dc61f25b61f481",
+                "url": "https://api.github.com/repos/WordPress/php-ai-client/zipball/dec7664cc17d8cf4287680c564fcdc428ebce7ec",
+                "reference": "dec7664cc17d8cf4287680c564fcdc428ebce7ec",
                 "shasum": ""
             },
             "require": {
@@ -2919,7 +2919,7 @@
                 "issues": "https://github.com/WordPress/php-ai-client/issues",
                 "source": "https://github.com/WordPress/php-ai-client"
             },
-            "time": "2026-09-09T18:36:40+00:00"
+            "time": "2026-09-09T19:05:01+00:00"
         }
     ],
     "aliases": [],
