@@ -179,11 +179,26 @@ class OpenAiTextGenerationModel extends AbstractApiBasedModel implements TextGen
         $webSearch = $config->getWebSearch();
         $customOptions = $config->getCustomOptions();
 
+        // Provider policy, not an OpenAI wire parameter or a core model requirement.
+        unset($customOptions['openai_tool_search_threshold'], $customOptions['deferredLoading']);
+
         if (is_array($functionDeclarations) || $webSearch) {
             $params['tools'] = $this->prepareToolsParam(
                 $functionDeclarations,
                 $webSearch
             );
+            if (!$this->supportsToolSearchInput($params['input'])) {
+                // Stateless history cannot retain discovery items with the current SDK message types.
+                $tools = [];
+                foreach ($params['tools'] as $tool) {
+                    if ($tool['type'] === 'tool_search') {
+                        continue;
+                    }
+                    unset($tool['defer_loading']);
+                    $tools[] = $tool;
+                }
+                $params['tools'] = $tools;
+            }
         }
 
         /*
@@ -567,17 +582,35 @@ class OpenAiTextGenerationModel extends AbstractApiBasedModel implements TextGen
         $tools = [];
         $this->openAiFunctionNameMap = [];
         $this->clientFunctionNameMap = [];
+        $deferByDefault = $this->shouldUseToolSearch(count($functionDeclarations ?? []));
+        $canDefer = $this->supportsToolSearch();
+        $useToolSearch = false;
 
         if (is_array($functionDeclarations)) {
             foreach ($functionDeclarations as $functionDeclaration) {
                 $openAiName = $this->openAiFunctionName($functionDeclaration->getName());
-                $tools[] = [
+                $tool = [
                     'type' => 'function',
                     'name' => $openAiName,
                     'description' => $functionDeclaration->getDescription(),
                     'parameters' => $functionDeclaration->getParameters(),
                 ];
+                // Older SDKs can still use request-level policy without per-function annotations.
+                $metadata = method_exists($functionDeclaration, 'getMetadata')
+                    ? $functionDeclaration->getMetadata() : [];
+                if (array_key_exists('deferredLoading', $metadata) && !is_bool($metadata['deferredLoading'])) {
+                    throw new InvalidArgumentException('Function metadata deferredLoading must be a boolean.');
+                }
+                if ($canDefer && ($metadata['deferredLoading'] ?? $deferByDefault)) {
+                    $tool['defer_loading'] = true;
+                    $useToolSearch = true;
+                }
+                $tools[] = $tool;
             }
+        }
+
+        if ($useToolSearch) {
+            $tools[] = ['type' => 'tool_search'];
         }
 
         if ($webSearch) {
@@ -588,6 +621,104 @@ class OpenAiTextGenerationModel extends AbstractApiBasedModel implements TextGen
         }
 
         return $tools;
+    }
+
+    /**
+     * Checks whether hosted search should optimize this request's function declarations.
+     *
+     * Uses a conservative model allowlist rather than assuming every newer or specialized
+     * model supports tool search. The threshold is an experimental provider policy.
+     *
+     * @since n.e.x.t
+     *
+     * @param int $functionCount The number of declared application functions.
+     * @return bool Whether to defer functions and enable hosted search.
+     */
+    protected function shouldUseToolSearch(int $functionCount): bool
+    {
+        $options = $this->getConfig()->getCustomOptions();
+        $threshold = array_key_exists('openai_tool_search_threshold', $options)
+            ? $options['openai_tool_search_threshold'] : 10;
+        if ($threshold !== false && (!is_int($threshold) || $threshold < 0)) {
+            throw new InvalidArgumentException('openai_tool_search_threshold must be a non-negative integer or false.');
+        }
+        if (array_key_exists('deferredLoading', $options) && !is_bool($options['deferredLoading'])) {
+            throw new InvalidArgumentException('The deferredLoading custom option must be a boolean.');
+        }
+
+        return $this->supportsToolSearch()
+            && (($options['deferredLoading'] ?? false) || ($threshold !== false && $functionCount > $threshold));
+    }
+
+    /**
+     * Checks whether the model and request options allow the hosted-search experiment.
+     *
+     * @since n.e.x.t
+     *
+     * @return bool Whether deferred tools can be used.
+     */
+    protected function supportsToolSearch(): bool
+    {
+        $options = $this->getConfig()->getCustomOptions();
+        if (
+            ($options['deferredLoading'] ?? null) === false
+            || ($options['openai_tool_search_threshold'] ?? null) === false
+            || ($options['store'] ?? true) === false
+            || (isset($options['tool_choice']) && $options['tool_choice'] !== 'auto')
+        ) {
+            return false;
+        }
+
+        return preg_match('/^gpt-5\.4(?:-pro)?(?:-\d{4}-\d{2}-\d{2})?$/', $this->metadata()->getId()) === 1;
+    }
+
+    /**
+     * Checks that input is new user content or tool results for a stored response.
+     *
+     * @since n.e.x.t
+     *
+     * @param list<array<string, mixed>> $input The prepared input items.
+     * @return bool Whether discovery state can remain on the server instead of being replayed.
+     */
+    protected function supportsToolSearchInput(array $input): bool
+    {
+        $options = $this->getConfig()->getCustomOptions();
+        $previousId = $options['previous_response_id'] ?? null;
+        foreach ($input as $item) {
+            if (
+                ($item['role'] ?? null) === 'assistant'
+                || in_array($item['type'] ?? null, ['reasoning', 'function_call'], true)
+                || (($item['type'] ?? null) === 'function_call_output'
+                    && (!is_string($previousId) || $previousId === ''))
+            ) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Validates hosted search output without representing it as an application function call.
+     *
+     * @since n.e.x.t
+     *
+     * @param array<string, mixed> $item The provider-native item.
+     * @return void
+     * @throws InvalidArgumentException If the item is not a completed hosted search item.
+     */
+    protected function validateToolSearchItem(array $item): void
+    {
+        $type = $item['type'] ?? null;
+        if (
+            !in_array($type, ['tool_search_call', 'tool_search_output'], true)
+            || ($item['execution'] ?? null) !== 'server'
+            || !array_key_exists('call_id', $item) || $item['call_id'] !== null
+            || ($item['status'] ?? null) !== 'completed'
+            || ($type === 'tool_search_call' && !is_array($item['arguments'] ?? null))
+            || ($type === 'tool_search_output' && !is_array($item['tools'] ?? null))
+        ) {
+            throw new InvalidArgumentException('Only completed hosted tool search items are supported.');
+        }
     }
 
     /**
@@ -635,6 +766,7 @@ class OpenAiTextGenerationModel extends AbstractApiBasedModel implements TextGen
 
         $candidates = [];
         $pendingReasoningParts = [];
+        $toolSearchUsed = false;
         foreach ($responseData['output'] as $index => $outputItem) {
             if (!is_array($outputItem) || array_is_list($outputItem)) {
                 throw ResponseException::fromInvalidData(
@@ -649,6 +781,21 @@ class OpenAiTextGenerationModel extends AbstractApiBasedModel implements TextGen
                 if ($reasoningPart !== null) {
                     $pendingReasoningParts[] = $reasoningPart;
                 }
+                continue;
+            }
+
+            if (in_array($outputItem['type'] ?? '', ['tool_search_call', 'tool_search_output'], true)) {
+                try {
+                    $this->validateToolSearchItem($outputItem);
+                } catch (InvalidArgumentException $e) {
+                    throw ResponseException::fromInvalidData(
+                        $this->providerMetadata()->getName(),
+                        "output[{$index}]",
+                        $e->getMessage()
+                    );
+                }
+                // OpenAI retains these items for previous_response_id continuation.
+                $toolSearchUsed = true;
                 continue;
             }
 
@@ -676,6 +823,19 @@ class OpenAiTextGenerationModel extends AbstractApiBasedModel implements TextGen
         // Use any other data from the response as provider-specific response metadata.
         $additionalData = $responseData;
         unset($additionalData['id'], $additionalData['output'], $additionalData['usage']);
+        if ($toolSearchUsed) {
+            if ($id === '') {
+                throw ResponseException::fromMissingData($this->providerMetadata()->getName(), 'id');
+            }
+            $additionalData['tool_search'] = ['continuation' => 'previous_response_id'];
+            if ($candidates === []) {
+                // The SDK requires a candidate, but hosted discovery is not an executable function call.
+                $candidates[] = new Candidate(
+                    new Message(MessageRoleEnum::model(), []),
+                    $this->parseStatusToFinishReason($status, false)
+                );
+            }
+        }
 
         return new GenerativeAiResult(
             $id,
