@@ -27,6 +27,14 @@ if (!defined('ABSPATH')) {
     return;
 }
 
+// Preserve the path beneath WP_PLUGIN_DIR when WordPress loads the plugin through a symlink.
+if (!defined('AI_PROVIDER_FOR_OPENAI_PLUGIN_DIR')) {
+    define(
+        'AI_PROVIDER_FOR_OPENAI_PLUGIN_DIR',
+        WP_PLUGIN_DIR . '/' . dirname(plugin_basename(__FILE__))
+    );
+}
+
 require_once __DIR__ . '/src/autoload.php';
 
 /**

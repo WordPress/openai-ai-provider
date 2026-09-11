@@ -99,7 +99,14 @@ class OpenAiProvider extends AbstractApiProvider
         }
         // Provider logoPath support was added in 1.3.0.
         if (version_compare(AiClient::VERSION, '1.3.0', '>=')) {
-            $providerMetadataArgs[] = dirname(__DIR__, 2) . '/assets/images/openai.svg';
+            $pluginDir = dirname(__DIR__, 2);
+            if (defined('AI_PROVIDER_FOR_OPENAI_PLUGIN_DIR')) {
+                $definedPluginDir = constant('AI_PROVIDER_FOR_OPENAI_PLUGIN_DIR');
+                if (is_string($definedPluginDir)) {
+                    $pluginDir = $definedPluginDir;
+                }
+            }
+            $providerMetadataArgs[] = $pluginDir . '/assets/images/openai.svg';
         }
         return new ProviderMetadata(...$providerMetadataArgs);
     }
