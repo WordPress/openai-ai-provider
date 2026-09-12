@@ -18,6 +18,7 @@ This plugin provides OpenAI integration for the PHP AI Client SDK. It enables Wo
 
 * Text generation with GPT models
 * Image generation with DALL-E models
+* Optional ChatGPT subscription-backed Codex provider
 * Function calling support
 * Web search support
 * Automatic provider registration
@@ -30,12 +31,14 @@ Available models are dynamically discovered from the OpenAI API, including GPT m
 * For WordPress 6.9, the [wordpress/php-ai-client](https://github.com/WordPress/php-ai-client) package must be installed
 * For WordPress 7.0 and above, no additional changes are required
 * OpenAI API key
+* Optional Codex OAuth refresh token for the Codex provider
 
 == Installation ==
 
 1. Upload the plugin files to `/wp-content/plugins/ai-provider-for-openai/`
 2. Activate the plugin through the 'Plugins' menu in WordPress
 3. Configure your OpenAI API key via the `OPENAI_API_KEY` environment variable or constant
+4. Optionally configure Codex OAuth token data with the `ai_provider_openai_codex_oauth_tokens` option or filter
 
 == Frequently Asked Questions ==
 

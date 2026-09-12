@@ -72,6 +72,31 @@ The provider uses the `OPENAI_API_KEY` environment variable for authentication. 
 putenv('OPENAI_API_KEY=your-api-key');
 ```
 
+### Codex OAuth
+
+The plugin also registers a `codex` provider for ChatGPT subscription-backed Codex access. Codex uses OAuth token data instead of an OpenAI Platform API key.
+
+In WordPress, token data can be supplied with the `ai_provider_openai_codex_oauth_tokens` option or filter. The expected shape is:
+
+```php
+[
+    'refresh_token' => '...',
+    'access_token'  => '...', // Optional; refreshed automatically when expired.
+    'expires_at'    => time() + 3600,
+    'account_id'    => '...', // Optional ChatGPT workspace/account ID.
+    'fedramp'       => false, // Optional.
+]
+```
+
+Constants are also supported for local configuration:
+
+```php
+define('AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN', '...');
+define('AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID', '...');
+```
+
+Codex models are available through the `codex` provider, for example `gpt-5.5`, `gpt-5`, and `codex-mini-latest`.
+
 ## License
 
 GPL-2.0-or-later
